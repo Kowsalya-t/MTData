@@ -1,0 +1,116 @@
+service: datalake-mtdata-msg-bus
+
+plugins:
+  - serverless-pseudo-parameters
+
+provider:
+  name: aws
+  stage: ${opt:stage, 'dev'}
+  runtime: python3.8
+  profile: ${opt:stage, 'dev'}
+  region: ap-southeast-2
+  timeout: 300
+  memorySize: 256 
+  stackTags:
+   Owner: 'kthandapani@MTDATA.COM.AU'
+   Project: 'datalake' 
+  tags:
+   Owner: 'kthandapani@MTDATA.COM.AU'
+   Project: 'datalake'
+  
+  
+  iamRoleStatements:
+    - Effect: "Allow"
+      Action:
+              - "s3:*"  
+              - "sqs:*"
+              - "lambda:*"
+              - "sns:*"
+              - "cloudwatch:*"
+              - "redshift:*"
+              - "iam:PassRole"
+              - "iam:CreateServiceLinkedRole"
+              - "ec2:*" #For lambda to know if the security group specified for redshift is available or not.
+              - "events:putrule"
+              - "events:putTargets"
+              - "glue:*"
+              - "kms:*"
+              - "logs:*"
+      Resource: 
+        - "*" 
+
+custom:
+  stage: ${opt:stage, self:provider.stage}
+  profiles:
+      dev: default
+      qa: default
+      prod: prod
+  brokerBucket:
+    dev: broker-messages-${self:provider.stage}
+    qa: broker-messages-${self:provider.stage}
+    prod: mtd-device-broker-messages
+  
+functions:
+  sqs_add:
+    handler: event_execution.sqs_add
+    environment:
+        environment: ${self:provider.stage} 
+    events:
+      - s3:
+         bucket: ${self:custom.brokerBucket.${self:custom.stage}} 
+         event:  "s3:ObjectCreated:*"
+         existing: true
+        
+  sqs_add_datalake:
+    handler: event_execution.sqs_add_datalake
+    environment:
+        environment: ${self:provider.stage} 
+    events:       
+      - s3:
+         bucket: mtdata-datalake-${self:provider.stage}  #This is enough to add event rules to existing bucket
+         event:  "s3:ObjectCreated:*"
+         rules:
+            - prefix: datalake_lnd/
+         existing: true  
+      - s3:
+         bucket: mtdata-datalake-${self:provider.stage}  #This is enough to add event rules to existing bucket
+         event:  "s3:ObjectCreated:*"
+         rules:
+            - prefix: datalake_stg/
+         existing: true
+         
+  msg_brkr_read:
+    handler: landing.msg_brkr_read
+    environment:
+        environment: ${self:provider.stage}  
+        snsTopic: 'arn:aws:sns:ap-southeast-2:#{AWS::AccountId}:DataLakeAlarm'
+
+  trnsfrm_stg_lake_msg_broker:
+    handler: staging.trnsfrm_stg_lake_msg_broker
+    environment:
+        environment: ${self:provider.stage} 
+        snsTopic: 'arn:aws:sns:ap-southeast-2:#{AWS::AccountId}:DataLakeAlarm'
+
+  mtdata_datalake_cp_redshift:
+    handler: loading.mtdata_datalake_cp_redshift
+    environment:
+        environment: ${self:provider.stage}
+        iam: 'arn:aws:iam::#{AWS::AccountId}:role/RedhshiftcallsS3'
+        snsTopic: 'arn:aws:sns:ap-southeast-2:#{AWS::AccountId}:DataLakeAlarm'
+
+  mtdata_unload_redshift_s3:
+    handler: unloading.mtdata_unload_redshift_s3
+    events:
+      - schedule: cron(0/30 23-7 ? * MON-FRI *)
+    environment:
+        environment: ${self:provider.stage}
+        iam: 'arn:aws:iam::#{AWS::AccountId}:role/RedhshiftcallsS3'
+        unloadPath: 's3://mtdata-datalake-${self:provider.stage}/unloaded/'
+        snsTopic: 'arn:aws:sns:ap-southeast-2:#{AWS::AccountId}:DataLakeAlarm'
+
+  close_idle_redshift_sessions:        
+      handler: close_session.close_idle_redshift_sessions
+      events:
+      - schedule: cron(0/30 23-7 ? * MON-FRI *)
+      environment:
+        environment: ${self:provider.stage}
